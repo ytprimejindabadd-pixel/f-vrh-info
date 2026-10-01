@@ -1,40 +1,35 @@
 #!/usr/bin/env python3
 """
-nxcar Vehicle Details - Clean URL Version
-URL: https://my-web.onrender.com/rc=MH02FZ0555
-Token & Checksum hidden in backend
+nxcar Vehicle Details API - Render Server
+Run: python app.py
+Then open: https://my-web.onrender.com/rc=MH02FZ0555
 """
 
 import os
 import requests
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, request, render_template_string
 
 app = Flask(__name__)
 
+# ---------- CONFIG ----------
 BASE_URL = "https://api.nxcar.in/vehicle_details"
 
-# ---------- HIDDEN CONFIG (Render Environment Variables) ----------
-# Render → Environment → Add these:
-#   NXCAR_TOKEN    = your JWT
-#   NXCAR_CHECKSUMS = comma separated checksum list (optional fallback)
-AUTH_TOKEN = os.environ.get("NXCAR_TOKEN", "").strip()
-DEFAULT_CHECKSUMS = [
-    c.strip() for c in os.environ.get("NXCAR_CHECKSUMS", "").split(",") if c.strip()
-]
+# Default token (can be overridden via form)
+DEFAULT_AUTH_TOKEN = (
+    "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9."
+    "eyJ1c2VyX2lkIjo3ODc4NiwidXNlcm5hbWUiOiI5NjEyMDU3NDU1Iiwicm9sZV9pZCI6IjEiLCJ0b2tlbl92ZXJzaW9uIjoiMSIsIkFQSV9USU1FIjoxNzkwODY0NzUxfQ."
+    "qAUgkmfMXrcp1N863xVhI_u50V040Qk7AnPhIUHXbWM"
+)
 
-# Manual checksum map (agar tumhe pata hai kis vehicle ka kaunsa checksum hai)
-# Format: {"MH02FZ0555": "27ca4c231bb8b41514fb08d5a413862b"}
-CHECKSUM_MAP = {
-    # "MH02FZ0555": "27ca4c231bb8b41514fb08d5a413862b",
-}
+DEFAULT_CHECKSUM = "27ca4c231bb8b41514fb08d5a413862b"
 
 
-def build_headers(auth_token: str):
+def build_headers(token: str):
     return {
         "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Mobile Safari/537.36",
         "Accept-Encoding": "gzip, deflate, br, zstd",
         "sec-ch-ua-platform": '"Android"',
-        "authorization": auth_token,
+        "authorization": token,
         "sec-ch-ua": '"Not=A?Brand";v="99", "Brave";v="151", "Chromium";v="151"',
         "sec-ch-ua-mobile": "?1",
         "sec-gpc": "1",
@@ -48,178 +43,315 @@ def build_headers(auth_token: str):
     }
 
 
-def try_checksum(vehicle_number: str, checksum: str):
-    params = {"vehicle_number": vehicle_number, "backend": "yes", "checksum": checksum}
+def fetch_vehicle(vehicle_number: str, checksum: str, token: str):
+    params = {
+        "vehicle_number": vehicle_number,
+        "backend": "yes",
+        "checksum": checksum,
+    }
     try:
-        r = requests.get(BASE_URL, params=params, headers=build_headers(AUTH_TOKEN), timeout=20)
+        r = requests.get(BASE_URL, params=params, headers=build_headers(token), timeout=25)
         try:
-            data = r.json()
+            return r.status_code, r.json()
         except ValueError:
-            data = {"raw": r.text}
-        return r.status_code, data
+            return r.status_code, {"raw": r.text}
     except requests.RequestException as e:
         return 500, {"error": str(e)}
 
 
-def fetch_vehicle_hidden(vehicle_number: str):
-    """
-    Try all possible checksums until we get a valid response.
-    1. Check CHECKSUM_MAP first
-    2. Then try DEFAULT_CHECKSUMS list
-    """
-    if not AUTH_TOKEN:
-        return 500, {"error": "Server token not configured. Set NXCAR_TOKEN on Render."}
-
-    # Step 1: check manual map
-    if vehicle_number in CHECKSUM_MAP:
-        code, data = try_checksum(vehicle_number, CHECKSUM_MAP[vehicle_number])
-        if code == 200 and not data.get("error"):
-            return code, data
-        # if failed, fall through to brute list
-
-    # Step 2: try all default checksums
-    if not DEFAULT_CHECKSUMS:
-        return 500, {
-            "error": "No checksums configured. Add NXCAR_CHECKSUMS env var or CHECKSUM_MAP."
-        }
-
-    last_error = None
-    for cs in DEFAULT_CHECKSUMS:
-        code, data = try_checksum(vehicle_number, cs)
-        # success = 200 and no error key and has meaningful data
-        if code == 200 and isinstance(data, dict) and not data.get("error"):
-            return code, data
-        last_error = (code, data)
-
-    return last_error or (500, {"error": "All checksums failed"})
-
-
 # ---------- HTML PAGE ----------
-HTML_PAGE = """
+PAGE_HTML = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>nxcar RC Lookup</title>
+<title>RC Lookup - Vehicle Details</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
     min-height: 100vh;
+    color: #e2e8f0;
     padding: 20px;
-    color: #333;
   }
-  .container {
-    max-width: 800px; margin: 0 auto; background: #fff;
-    border-radius: 16px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); overflow: hidden;
+  .container { max-width: 900px; margin: 0 auto; }
+  h1 {
+    text-align: center;
+    font-size: 28px;
+    margin-bottom: 6px;
+    background: linear-gradient(90deg, #38bdf8, #a78bfa);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
   }
-  .header {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    color: #fff; padding: 28px 30px;
+  .sub { text-align: center; color: #94a3b8; margin-bottom: 24px; font-size: 13px; }
+  .card {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 14px;
+    padding: 20px;
+    margin-bottom: 18px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.35);
   }
-  .header h1 { font-size: 22px; margin-bottom: 6px; }
-  .header p { opacity: 0.9; font-size: 13px; }
-  .body { padding: 30px; }
-  .search {
-    display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap;
+  label {
+    display: block;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #94a3b8;
+    margin-bottom: 6px;
   }
-  .search input {
-    flex: 1; min-width: 200px;
-    padding: 14px 16px; border: 2px solid #e2e8f0; border-radius: 10px;
-    font-size: 16px; font-weight: 600; letter-spacing: 1px;
-    text-transform: uppercase; background: #f8fafc;
+  input, textarea {
+    width: 100%;
+    padding: 11px 13px;
+    border-radius: 9px;
+    border: 1px solid #334155;
+    background: #0f172a;
+    color: #e2e8f0;
+    font-size: 14px;
+    font-family: inherit;
+    outline: none;
+    transition: border 0.2s;
   }
-  .search input:focus {
-    outline: none; border-color: #667eea; background: #fff;
-    box-shadow: 0 0 0 4px rgba(102,126,234,0.1);
+  input:focus, textarea:focus { border-color: #38bdf8; }
+  textarea { resize: vertical; min-height: 60px; font-family: monospace; font-size: 12px; }
+  .field { margin-bottom: 14px; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .row > .field { flex: 1; min-width: 200px; }
+  button {
+    width: 100%;
+    padding: 13px;
+    border: none;
+    border-radius: 9px;
+    background: linear-gradient(90deg, #0ea5e9, #8b5cf6);
+    color: white;
+    font-size: 15px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: opacity 0.2s, transform 0.1s;
   }
-  .search button {
-    padding: 14px 28px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    color: #fff; border: none; border-radius: 10px;
-    font-size: 16px; font-weight: 600; cursor: pointer;
-    transition: transform 0.15s, box-shadow 0.15s;
+  button:hover { opacity: 0.92; }
+  button:active { transform: scale(0.99); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .toggle {
+    text-align: center;
+    margin-top: 14px;
+    color: #64748b;
+    font-size: 12px;
+    cursor: pointer;
+    user-select: none;
   }
-  .search button:hover { transform: translateY(-2px); box-shadow: 0 8px 20px rgba(102,126,234,0.4); }
-  .search button:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
-  .loader { display: none; text-align: center; padding: 30px; color: #667eea; font-weight: 600; }
-  .loader.active { display: block; }
+  .toggle:hover { color: #38bdf8; }
+  #advanced { display: none; margin-top: 14px; }
+  .result {
+    margin-top: 18px;
+    background: #0f172a;
+    border: 1px solid #334155;
+    border-radius: 10px;
+    padding: 16px;
+    display: none;
+  }
+  .result.show { display: block; }
+  .result h3 {
+    font-size: 13px;
+    color: #38bdf8;
+    margin-bottom: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .kv {
+    display: grid;
+    grid-template-columns: 40% 60%;
+    gap: 6px 12px;
+    font-size: 13px;
+  }
+  .kv .k { color: #94a3b8; }
+  .kv .v { color: #e2e8f0; word-break: break-word; }
+  pre {
+    background: #020617;
+    padding: 12px;
+    border-radius: 8px;
+    overflow-x: auto;
+    font-size: 11px;
+    color: #67e8f9;
+    max-height: 400px;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .error { color: #f87171; }
   .spinner {
-    display: inline-block; width: 22px; height: 22px;
-    border: 3px solid #e2e8f0; border-top-color: #667eea;
-    border-radius: 50%; animation: spin 0.7s linear infinite;
-    vertical-align: middle; margin-right: 10px;
+    display: inline-block;
+    width: 14px; height: 14px;
+    border: 2px solid rgba(255,255,255,0.3);
+    border-top-color: white;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    vertical-align: middle;
+    margin-right: 6px;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
-  .result { margin-top: 10px; animation: fadeIn 0.3s; }
-  @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
   .badge {
-    display: inline-block; padding: 6px 14px; border-radius: 8px;
-    font-size: 12px; font-weight: 700; text-transform: uppercase;
-    margin-bottom: 14px;
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    background: #064e3b;
+    color: #6ee7b7;
   }
-  .badge.ok { background: #d1fae5; color: #065f46; }
-  .badge.err { background: #fee2e2; color: #991b1b; }
-  pre {
-    background: #1e293b; color: #e2e8f0; padding: 18px;
-    border-radius: 10px; overflow-x: auto; font-size: 13px;
-    line-height: 1.6; max-height: 600px;
-  }
-  .hint { font-size: 12px; color: #94a3b8; margin-top: 12px; text-align: center; }
+  .badge.err { background: #7f1d1d; color: #fca5a5; }
 </style>
 </head>
 <body>
-  <div class="container">
-    <div class="header">
-      <h1>🚗 nxcar RC Lookup</h1>
-      <p>Enter vehicle number — token & checksum handled on server</p>
+<div class="container">
+  <h1>🚗 RC Vehicle Lookup</h1>
+  <p class="sub">Enter vehicle number to fetch details</p>
+
+  <div class="card">
+    <div class="field">
+      <label>Vehicle Number</label>
+      <input id="vnum" type="text" placeholder="MH02FZ0555" style="text-transform: uppercase;">
     </div>
-    <div class="body">
-      <div class="search">
-        <input id="vehicle" type="text" placeholder="MH02FZ0555" value="{{ vehicle }}" autofocus>
-        <button id="go" onclick="run()">🔍 Search</button>
+
+    <button id="go" onclick="lookup()">🔍 Get Details</button>
+
+    <div class="toggle" onclick="toggleAdv()">⚙️ Advanced Settings (Auth Token / Checksum)</div>
+
+    <div id="advanced">
+      <div class="field" style="margin-top:10px;">
+        <label>Authorization Token</label>
+        <textarea id="token" placeholder="Paste JWT token here..."></textarea>
       </div>
-      <div class="loader" id="loader"><span class="spinner"></span>Fetching vehicle details...</div>
-      <div class="result" id="result"></div>
-      <div class="hint">Try: /rc=MH02FZ0555 in URL for direct lookup</div>
+      <div class="field">
+        <label>Checksum</label>
+        <input id="checksum" type="text" placeholder="27ca4c231bb8b41514fb08d5a413862b">
+      </div>
     </div>
   </div>
 
+  <div id="result" class="result"></div>
+</div>
+
 <script>
-async function run() {
-  const vehicle = document.getElementById('vehicle').value.trim().toUpperCase();
-  if (!vehicle) return alert('Enter vehicle number');
+  // Prefill from localStorage
+  const savedToken = localStorage.getItem('nx_token') || '';
+  const savedSum   = localStorage.getItem('nx_checksum') || '';
+  document.getElementById('token').value    = savedToken;
+  document.getElementById('checksum').value = savedSum;
 
-  const btn = document.getElementById('go');
-  const loader = document.getElementById('loader');
-  const result = document.getElementById('result');
-
-  btn.disabled = true;
-  loader.classList.add('active');
-  result.innerHTML = '';
-
-  try {
-    const res = await fetch('/rc=' + encodeURIComponent(vehicle));
-    const data = await res.json();
-    const ok = res.ok && !data.error;
-
-    result.innerHTML = `
-      <span class="badge ${ok ? 'ok' : 'err'}">${ok ? '✓ Success' : '✗ Failed'}</span>
-      <pre>${JSON.stringify(data, null, 2).replace(/</g, '&lt;')}</pre>
-    `;
-  } catch (e) {
-    result.innerHTML = `<span class="badge err">Error</span><pre>${e.message}</pre>`;
+  // Auto-load from URL ?rc=MH02FZ0555
+  const urlParams = new URLSearchParams(window.location.search);
+  const rcParam = urlParams.get('rc') || window.location.pathname.split('/rc=')[1];
+  if (rcParam) {
+    document.getElementById('vnum').value = rcParam.toUpperCase();
+    setTimeout(lookup, 400);
   }
 
-  btn.disabled = false;
-  loader.classList.remove('active');
-}
+  function toggleAdv() {
+    const a = document.getElementById('advanced');
+    a.style.display = a.style.display === 'block' ? 'none' : 'block';
+  }
 
-// Enter key triggers search
-document.getElementById('vehicle').addEventListener('keypress', e => {
-  if (e.key === 'Enter') run();
-});
+  async function lookup() {
+    const vnum = document.getElementById('vnum').value.trim().toUpperCase();
+    const token = document.getElementById('token').value.trim();
+    const checksum = document.getElementById('checksum').value.trim();
+
+    if (!vnum) { alert('Enter vehicle number'); return; }
+
+    // Save to localStorage
+    if (token) localStorage.setItem('nx_token', token);
+    if (checksum) localStorage.setItem('nx_checksum', checksum);
+
+    const btn = document.getElementById('go');
+    const res = document.getElementById('result');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Fetching...';
+    res.className = 'result show';
+    res.innerHTML = '<p style="color:#94a3b8">Loading...</p>';
+
+    try {
+      const payload = { vehicle_number: vnum };
+      if (token) payload.token = token;
+      if (checksum) payload.checksum = checksum;
+
+      const r = await fetch('/api/vehicle', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+      });
+      const data = await r.json();
+      renderResult(data, r.status);
+    } catch (e) {
+      res.innerHTML = '<h3 class="error">Network Error</h3><p class="error">' + e.message + '</p>';
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '🔍 Get Details';
+    }
+  }
+
+  function renderResult(data, status) {
+    const res = document.getElementById('result');
+    let html = '';
+
+    // Try to find the actual vehicle data
+    let v = data;
+    if (data && data.data && typeof data.data === 'object') v = data.data;
+    if (data && data.result && typeof data.result === 'object') v = data.result;
+
+    if (status >= 400 || (data && data.error)) {
+      html += '<h3><span class="badge err">ERROR</span></h3>';
+      html += '<pre>' + JSON.stringify(data, null, 2) + '</pre>';
+      res.innerHTML = html;
+      return;
+    }
+
+    html += '<h3><span class="badge">SUCCESS</span> Vehicle Details</h3>';
+
+    // Friendly key-value view
+    const flat = flatten(v);
+    if (Object.keys(flat).length > 0) {
+      html += '<div class="kv">';
+      for (const [k, val] of Object.entries(flat)) {
+        html += `<div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(String(val))}</div>`;
+      }
+      html += '</div>';
+    }
+
+    // Raw JSON toggle
+    html += '<div class="toggle" style="margin-top:14px;" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display===\\'block\\'?\\'none\\':\\'block\\'">📄 Show Raw JSON</div>';
+    html += '<pre style="display:none;margin-top:10px;">' + JSON.stringify(data, null, 2) + '</pre>';
+
+    res.innerHTML = html;
+  }
+
+  function flatten(obj, prefix = '') {
+    const out = {};
+    if (!obj || typeof obj !== 'object') return out;
+    for (const [k, v] of Object.entries(obj)) {
+      const key = prefix ? prefix + ' → ' + k : k;
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        Object.assign(out, flatten(v, key));
+      } else if (Array.isArray(v)) {
+        out[key] = v.join(', ');
+      } else if (v !== null && v !== '') {
+        out[key] = v;
+      }
+    }
+    return out;
+  }
+
+  function escapeHtml(s) {
+    return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  // Enter key
+  document.getElementById('vnum').addEventListener('keydown', e => {
+    if (e.key === 'Enter') lookup();
+  });
 </script>
 </body>
 </html>
@@ -228,42 +360,47 @@ document.getElementById('vehicle').addEventListener('keypress', e => {
 
 # ---------- ROUTES ----------
 
-@app.route("/rc=<vehicle_number>")
-def rc_lookup(vehicle_number):
-    """
-    Clean URL: /rc=MH02FZ0555
-    Directly returns JSON (works for both browser + API calls)
-    """
-    vehicle_number = vehicle_number.strip().upper()
+@app.route("/")
+def home():
+    return render_template_string(PAGE_HTML)
 
-    # Basic validation
-    if not (5 <= len(vehicle_number) <= 15):
-        return jsonify({"error": "Invalid vehicle number"}), 400
 
-    # Check if request wants HTML (browser) or JSON (API)
-    wants_html = "text/html" in request.headers.get("Accept", "") if False else False
-    # Actually let's just always return JSON — simpler
+@app.route("/rc=<path:vehicle_number>")
+def rc_path(vehicle_number):
+    """Pretty URL: /rc=MH02FZ0555"""
+    return render_template_string(PAGE_HTML)
 
-    code, data = fetch_vehicle_hidden(vehicle_number)
+
+@app.route("/api/vehicle", methods=["POST"])
+def api_vehicle():
+    """Hidden backend - handles auth token + checksum internally."""
+    body = request.get_json(silent=True) or {}
+    vnum = (body.get("vehicle_number") or "").strip().upper()
+    token = (body.get("token") or "").strip() or DEFAULT_AUTH_TOKEN
+    checksum = (body.get("checksum") or "").strip() or DEFAULT_CHECKSUM
+
+    if not vnum:
+        return jsonify({"error": "vehicle_number required"}), 400
+
+    code, data = fetch_vehicle(vnum, checksum, token)
     return jsonify(data), code
 
 
-@app.route("/")
-def home():
-    return render_template_string(HTML_PAGE, vehicle="")
+@app.route("/vehicle/<vehicle_number>")
+def vehicle(vehicle_number):
+    """Legacy GET endpoint."""
+    checksum = request.args.get("checksum", DEFAULT_CHECKSUM)
+    token = request.args.get("token", DEFAULT_AUTH_TOKEN)
+    code, data = fetch_vehicle(vehicle_number.upper(), checksum, token)
+    return jsonify(data), code
 
 
-@app.route("/health")
-def health():
-    return jsonify({
-        "status": "ok",
-        "token_set": bool(AUTH_TOKEN),
-        "checksums_count": len(DEFAULT_CHECKSUMS),
-        "map_entries": len(CHECKSUM_MAP),
-    })
-
-
+# ---------- MAIN ----------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    print(f"nxcar server running on http://0.0.0.0:{port}")
+    print("=" * 60)
+    print("  nxcar Vehicle Details Server")
+    print(f"  Local:   http://127.0.0.1:{port}/")
+    print(f"  Example: http://127.0.0.1:{port}/rc=MH02FZ0555")
+    print("=" * 60)
     app.run(host="0.0.0.0", port=port, debug=False)
