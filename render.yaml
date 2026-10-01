@@ -2,13 +2,10 @@ services:
   - type: web
     name: nxcar-ultra
     runtime: python
-    buildCommand: |
-      pip install -r requirements.txt
-      playwright install chromium
-      playwright install-deps chromium || true
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120 --workers 1
+    buildCommand: bash build.sh
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 180 --workers 1
     envVars:
-      - key: NXCAR_PHONE
-        value: "9816072037"
+      - key: DATA_DIR
+        value: /tmp/nxcar
       - key: PYTHON_VERSION
-        value: "3.11.0"
+        value: 3.11.0
