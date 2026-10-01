@@ -1,488 +1,269 @@
-# app.py — AUTO TOKEN + MULTI CHECKSUM
-import os, json, time, threading
+#!/usr/bin/env python3
+"""
+nxcar Vehicle Details - Clean URL Version
+URL: https://my-web.onrender.com/rc=MH02FZ0555
+Token & Checksum hidden in backend
+"""
+
+import os
 import requests
-from flask import Flask, jsonify, render_template_string, request
+from flask import Flask, jsonify, render_template_string
 
 app = Flask(__name__)
 
-BASE_UA  = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Mobile Safari/537.36"
-BASE_URL = "https://www.nxcar.in"
-API_URL  = "https://api.nxcar.in"
-CFG_FILE = "/tmp/nxcar_state.json"
+BASE_URL = "https://api.nxcar.in/vehicle_details"
+
+# ---------- HIDDEN CONFIG (Render Environment Variables) ----------
+# Render → Environment → Add these:
+#   NXCAR_TOKEN    = your JWT
+#   NXCAR_CHECKSUMS = comma separated checksum list (optional fallback)
+AUTH_TOKEN = os.environ.get("NXCAR_TOKEN", "").strip()
+DEFAULT_CHECKSUMS = [
+    c.strip() for c in os.environ.get("NXCAR_CHECKSUMS", "").split(",") if c.strip()
+]
+
+# Manual checksum map (agar tumhe pata hai kis vehicle ka kaunsa checksum hai)
+# Format: {"MH02FZ0555": "27ca4c231bb8b41514fb08d5a413862b"}
+CHECKSUM_MAP = {
+    # "MH02FZ0555": "27ca4c231bb8b41514fb08d5a413862b",
+}
 
 
-# ============================================================
-# STATE
-# ============================================================
-class State:
-    def __init__(self):
-        self.auth_token = None
-        self.checksums = []
-        self.auto_refresh = True
-        self.lock = threading.Lock()
-        self.load()
-
-    def save(self):
-        try:
-            with open(CFG_FILE, "w") as f:
-                json.dump({
-                    "auth_token": self.auth_token,
-                    "checksums": self.checksums,
-                }, f)
-        except Exception as e:
-            print("[SAVE]", e, flush=True)
-
-    def load(self):
-        try:
-            if os.path.exists(CFG_FILE):
-                with open(CFG_FILE) as f:
-                    d = json.load(f)
-                self.auth_token = d.get("auth_token")
-                self.checksums = d.get("checksums", [])
-                print(f"[LOAD] token={'✅' if self.auth_token else '❌'} cs={len(self.checksums)}", flush=True)
-        except Exception as e:
-            print("[LOAD]", e, flush=True)
-
-    def set_auth(self, token):
-        with self.lock:
-            self.auth_token = token.strip()
-            self.save()
-
-    def set_checksums(self, lst):
-        with self.lock:
-            seen, clean = set(), []
-            for c in lst:
-                c = c.strip().lower()
-                if len(c) == 32 and c not in seen:
-                    seen.add(c)
-                    clean.append(c)
-            self.checksums = clean
-            self.save()
-            return len(clean)
-
-    def snapshot(self):
-        return {
-            "has_token": bool(self.auth_token),
-            "token_preview": (self.auth_token[:40] + "...") if self.auth_token else None,
-            "checksums_count": len(self.checksums),
-            "checksums_preview": [c[:12] + "..." for c in self.checksums[:5]],
-        }
-
-
-STATE = State()
-
-
-# ============================================================
-# AUTO TOKEN FETCH (browser ki tarah request bhejo)
-# ============================================================
-def try_auto_fetch_token():
-    """
-    Koshish karo nxcar se token auto fetch karne ki.
-    Ye tabhi kaam karega jab koi public endpoint token de raha ho.
-    Warna manual paste hi option hai.
-    """
-    try:
-        # Public user endpoint — kabhi kabhi token deta hai
-        r = requests.get(f"{BASE_URL}/api/auth/user",
-                         headers={"User-Agent": BASE_UA, "referer": f"{BASE_URL}/profile-edit"},
-                         timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            token = (data.get("token") or data.get("auth_token")
-                     or data.get("data", {}).get("token"))
-            if token:
-                print("[AUTO-TOKEN] ✅ got from /api/auth/user", flush=True)
-                return token
-    except Exception as e:
-        print("[AUTO-TOKEN] failed:", e, flush=True)
-    return None
-
-
-# ============================================================
-# VEHICLE DETAILS CALL
-# ============================================================
-def call_vehicle_details(vn, checksum, auth_token):
-    url = f"{API_URL}/vehicle_details"
-    params = {
-        "vehicle_number": vn.upper().strip(),
-        "backend": "yes",
-        "checksum": checksum,
-    }
-    headers = {
-        "Host": "api.nxcar.in",
-        "User-Agent": BASE_UA,
-        "Accept-Encoding": "gzip, deflate, br",
+def build_headers(auth_token: str):
+    return {
+        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Mobile Safari/537.36",
+        "Accept-Encoding": "gzip, deflate, br, zstd",
         "sec-ch-ua-platform": '"Android"',
-        "authorization": auth_token or "",
+        "authorization": auth_token,
         "sec-ch-ua": '"Not=A?Brand";v="99", "Brave";v="151", "Chromium";v="151"',
         "sec-ch-ua-mobile": "?1",
         "sec-gpc": "1",
-        "origin": BASE_URL,
+        "origin": "https://www.nxcar.in",
         "sec-fetch-site": "same-site",
         "sec-fetch-mode": "cors",
         "sec-fetch-dest": "empty",
-        "referer": f"{BASE_URL}/",
+        "referer": "https://www.nxcar.in/",
         "accept-language": "en-US,en;q=0.6",
         "priority": "u=1, i",
     }
+
+
+def try_checksum(vehicle_number: str, checksum: str):
+    params = {"vehicle_number": vehicle_number, "backend": "yes", "checksum": checksum}
     try:
-        r = requests.get(url, params=params, headers=headers, timeout=30)
-        try: data = r.json()
-        except: data = r.text
-        return {"status": r.status_code, "data": data}
-    except Exception as e:
-        return {"status": 0, "error": str(e)}
+        r = requests.get(BASE_URL, params=params, headers=build_headers(AUTH_TOKEN), timeout=20)
+        try:
+            data = r.json()
+        except ValueError:
+            data = {"raw": r.text}
+        return r.status_code, data
+    except requests.RequestException as e:
+        return 500, {"error": str(e)}
 
 
-def is_success(vd_data):
-    """Return True if response contains real vehicle data"""
-    if isinstance(vd_data, dict):
-        if not vd_data: return False
-        if len(vd_data) == 1 and ("message" in vd_data or "error" in vd_data):
-            return False
-        # Real data has multiple keys usually
-        return len(vd_data) >= 2 or "vehicle_number" in vd_data or "owner_name" in vd_data
-    if isinstance(vd_data, list):
-        if len(vd_data) == 1 and isinstance(vd_data[0], str):
-            low = vd_data[0].lower()
-            if any(x in low for x in ["try again", "invalid", "error", "not found"]):
-                return False
-        return len(vd_data) > 0
-    return False
+def fetch_vehicle_hidden(vehicle_number: str):
+    """
+    Try all possible checksums until we get a valid response.
+    1. Check CHECKSUM_MAP first
+    2. Then try DEFAULT_CHECKSUMS list
+    """
+    if not AUTH_TOKEN:
+        return 500, {"error": "Server token not configured. Set NXCAR_TOKEN on Render."}
 
+    # Step 1: check manual map
+    if vehicle_number in CHECKSUM_MAP:
+        code, data = try_checksum(vehicle_number, CHECKSUM_MAP[vehicle_number])
+        if code == 200 and not data.get("error"):
+            return code, data
+        # if failed, fall through to brute list
 
-# ============================================================
-# MAIN LOOKUP — try all checksums
-# ============================================================
-def try_all(vn):
-    vn = vn.upper().strip()
-    auth = STATE.auth_token
-
-    if not auth:
-        # Try auto-fetch
-        auth = try_auto_fetch_token()
-        if auth:
-            STATE.set_auth(auth)
-
-    if not auth:
-        return {
-            "success": False,
-            "error": "Auth token missing. Paste once from browser (30 din valid).",
-            "vehicle_number": vn,
-        }
-    if not STATE.checksums:
-        return {
-            "success": False,
-            "error": "No checksums saved. Paste at least 1.",
-            "vehicle_number": vn,
+    # Step 2: try all default checksums
+    if not DEFAULT_CHECKSUMS:
+        return 500, {
+            "error": "No checksums configured. Add NXCAR_CHECKSUMS env var or CHECKSUM_MAP."
         }
 
-    attempts = []
-    for idx, cs in enumerate(STATE.checksums, 1):
-        r = call_vehicle_details(vn, cs, auth)
-        ok = is_success(r.get("data"))
-        preview = str(r.get("data"))
-        attempts.append({
-            "try": idx,
-            "checksum": cs,
-            "status": r.get("status"),
-            "success": ok,
-            "preview": preview[:200],
-        })
-        print(f"[TRY {idx}/{len(STATE.checksums)}] {cs[:12]}... → {r.get('status')} ok={ok}", flush=True)
+    last_error = None
+    for cs in DEFAULT_CHECKSUMS:
+        code, data = try_checksum(vehicle_number, cs)
+        # success = 200 and no error key and has meaningful data
+        if code == 200 and isinstance(data, dict) and not data.get("error"):
+            return code, data
+        last_error = (code, data)
 
-        if ok:
-            return {
-                "success": True,
-                "vehicle_number": vn,
-                "winning_checksum": cs,
-                "winning_try": idx,
-                "total_tries": len(STATE.checksums),
-                "http_status": r.get("status"),
-                "vehicle_details_response": r.get("data"),
-                "attempts": attempts,
-            }
-
-    return {
-        "success": False,
-        "vehicle_number": vn,
-        "error": f"None of {len(STATE.checksums)} checksums worked. Auth token expired?",
-        "attempts": attempts,
-    }
+    return last_error or (500, {"error": "All checksums failed"})
 
 
-# ============================================================
-# ROUTES
-# ============================================================
-@app.route("/rc=<vehicle_number>")
-def rc_api(vn):
-    try:
-        return jsonify(try_all(vn))
-    except Exception as e:
-        import traceback
-        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
-
-@app.route("/rc/<vehicle_number>")
-def rc_api2(vn):
-    return rc_api(vn)
-
-@app.route("/state")
-def state():
-    return jsonify(STATE.snapshot())
-
-@app.route("/set-token")
-def set_token():
-    t = request.args.get("token", "").strip()
-    if not t: return jsonify({"error": "token required"}), 400
-    STATE.set_auth(t)
-    return jsonify({"success": True, **STATE.snapshot()})
-
-@app.route("/add-checksums")
-def add_checksums():
-    cs_list = request.args.getlist("c")
-    raw = request.args.get("list", "")
-    if raw:
-        cs_list += [x.strip() for x in raw.split(",") if x.strip()]
-    if not cs_list:
-        return jsonify({"error": "no checksums provided"}), 400
-    n = STATE.set_checksums(cs_list)
-    return jsonify({"success": True, "saved": n, **STATE.snapshot()})
-
-@app.route("/clear-all")
-def clear_all():
-    STATE.auth_token = None
-    STATE.checksums = []
-    STATE.save()
-    return jsonify({"success": True})
-
-@app.route("/auto-fetch-token")
-def auto_fetch_token():
-    t = try_auto_fetch_token()
-    if t:
-        STATE.set_auth(t)
-        return jsonify({"success": True, "token": t[:40] + "..."})
-    return jsonify({"success": False, "error": "Could not auto-fetch"})
-
-@app.route("/healthz")
-def healthz():
-    return jsonify({"ok": True})
-
-
-# ============================================================
-# HTML UI
-# ============================================================
-HTML = r"""
-<!DOCTYPE html><html><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>🚗 nxcar RC — Auto</title>
+# ---------- HTML PAGE ----------
+HTML_PAGE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>nxcar RC Lookup</title>
 <style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,sans-serif;background:linear-gradient(135deg,#0f0c29,#302b63,#24243e);
-min-height:100vh;color:#fff;padding:20px}
-.c{max-width:960px;margin:0 auto}
-h1{text-align:center;font-size:2rem;margin-bottom:8px;
-background:linear-gradient(90deg,#00d4ff,#7b2ff7);-webkit-background-clip:text;
--webkit-text-fill-color:transparent}
-.sub{text-align:center;color:#aaa;margin-bottom:15px;font-size:.85rem}
-.status{text-align:center;font-size:.85rem;padding:12px;border-radius:12px;
-background:rgba(255,255,255,.05);margin-bottom:15px;border:1px solid rgba(255,255,255,.1)}
-.card{background:rgba(255,255,255,.05);border-radius:16px;padding:20px;margin-bottom:15px;
-border:1px solid rgba(255,255,255,.1)}
-.card h3{color:#00d4ff;margin-bottom:12px;font-size:1.05rem}
-textarea,input{width:100%;padding:12px;border-radius:10px;border:2px solid #444;
-background:rgba(255,255,255,.05);color:#fff;font-size:.9rem;outline:none;
-font-family:monospace;resize:vertical;margin-bottom:8px}
-input:focus,textarea:focus{border-color:#00d4ff}
-button{padding:12px 22px;border-radius:10px;border:none;cursor:pointer;
-background:linear-gradient(135deg,#00d4ff,#7b2ff7);color:#fff;font-weight:600;
-margin-right:6px;margin-top:6px}
-button:hover{transform:translateY(-2px)}
-button:disabled{opacity:.6}
-.search{display:flex;gap:10px}
-pre{background:#0a0a1a;padding:16px;border-radius:10px;overflow:auto;
-font-size:.78rem;color:#b8ffb8;border:1px solid #1a1a3a;max-height:500px}
-.badge{padding:4px 10px;border-radius:20px;font-size:.72rem;font-weight:600;margin-left:6px}
-.ok{background:#00c853;color:#000}
-.err{background:#ff1744;color:#fff}
-.loader{display:none;text-align:center;padding:30px}
-.loader.active{display:block}
-.spin{width:50px;height:50px;border:4px solid rgba(255,255,255,.1);
-border-top-color:#00d4ff;border-radius:50%;animation:s 1s linear infinite;margin:0 auto 15px}
-@keyframes s{to{transform:rotate(360deg)}}
-.msg{font-size:.82rem;color:#aaa;margin-top:8px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin-top:10px}
-.kv{background:rgba(0,0,0,.3);padding:10px 14px;border-radius:10px;border:1px solid rgba(255,255,255,.08)}
-.kv .k{font-size:.7rem;color:#888;text-transform:uppercase}
-.kv .v{font-size:.9rem;color:#fff;font-weight:600;margin-top:4px;word-break:break-all}
-.try-row{display:grid;grid-template-columns:50px 1fr 60px 50px;gap:8px;
-padding:8px;border-radius:8px;margin-bottom:6px;font-size:.78rem;font-family:monospace}
-.try-ok{background:rgba(0,200,83,.15);border:1px solid rgba(0,200,83,.3)}
-.try-fail{background:rgba(255,23,68,.08);border:1px solid rgba(255,23,68,.2)}
-code{background:rgba(0,212,255,.12);padding:2px 6px;border-radius:4px;color:#7fff7f;font-size:.85rem}
-.warn{background:rgba(255,171,0,.1);border:1px solid rgba(255,171,0,.4);
-padding:12px;border-radius:10px;font-size:.82rem;color:#ffd54f;margin-bottom:12px}
-</style></head><body>
-<div class="c">
-<h1>🚗 nxcar RC — Auto</h1>
-<p class="sub">Auto Token • Multi Checksum • Try Until Success</p>
-<div class="status" id="status">Loading...</div>
-
-<div class="warn">
-<b>Pehli baar setup (sirf ek baar):</b><br>
-1️⃣ Browser me nxcar.in login karo → F12 → Network → koi bhi request → <code>authorization</code> header copy karo<br>
-2️⃣ Neeche paste karke <b>Save Token</b> dabao — 30 din valid rahega<br>
-3️⃣ Checksums paste karo (10-50) → <b>Save Checksums</b><br>
-4️⃣ Bas! Ab vehicle number daalo → <b>Search</b> → auto try karega sab checksums
-</div>
-
-<div class="card">
-<h3>🔑 Auth Token <span id="tokStatus"></span></h3>
-<textarea id="token" rows="3" placeholder="eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9..."></textarea>
-<button onclick="saveToken()">💾 Save Token</button>
-<button onclick="autoFetch()">🔄 Auto-Fetch</button>
-<div class="msg" id="tokMsg"></div>
-</div>
-
-<div class="card">
-<h3>📝 Checksums List <span id="csStatus"></span></h3>
-<textarea id="checksums" rows="8" placeholder="Ek per line ya comma separated:
-27ca4c231bb8b41514fb08d5a413862b
-abc123...
-..."></textarea>
-<button onclick="saveChecksums()">💾 Save Checksums</button>
-<button style="background:linear-gradient(135deg,#ff5252,#b71c1c)" onclick="clearAll()">🗑️ Clear</button>
-<div class="msg" id="csMsg"></div>
-</div>
-
-<div class="card">
-<h3>🔍 Vehicle Search</h3>
-<div class="search">
-<input id="vnum" value="MH02FZ0555" onkeypress="if(event.key==='Enter')go()">
-<button id="btn" onclick="go()">🔍 Search All</button>
-</div>
-</div>
-
-<div class="loader" id="loader"><div class="spin"></div>Testing checksums... (may take 10-30s)</div>
-<div id="result"></div>
-</div>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    min-height: 100vh;
+    padding: 20px;
+    color: #333;
+  }
+  .container {
+    max-width: 800px; margin: 0 auto; background: #fff;
+    border-radius: 16px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); overflow: hidden;
+  }
+  .header {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: #fff; padding: 28px 30px;
+  }
+  .header h1 { font-size: 22px; margin-bottom: 6px; }
+  .header p { opacity: 0.9; font-size: 13px; }
+  .body { padding: 30px; }
+  .search {
+    display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap;
+  }
+  .search input {
+    flex: 1; min-width: 200px;
+    padding: 14px 16px; border: 2px solid #e2e8f0; border-radius: 10px;
+    font-size: 16px; font-weight: 600; letter-spacing: 1px;
+    text-transform: uppercase; background: #f8fafc;
+  }
+  .search input:focus {
+    outline: none; border-color: #667eea; background: #fff;
+    box-shadow: 0 0 0 4px rgba(102,126,234,0.1);
+  }
+  .search button {
+    padding: 14px 28px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: #fff; border: none; border-radius: 10px;
+    font-size: 16px; font-weight: 600; cursor: pointer;
+    transition: transform 0.15s, box-shadow 0.15s;
+  }
+  .search button:hover { transform: translateY(-2px); box-shadow: 0 8px 20px rgba(102,126,234,0.4); }
+  .search button:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+  .loader { display: none; text-align: center; padding: 30px; color: #667eea; font-weight: 600; }
+  .loader.active { display: block; }
+  .spinner {
+    display: inline-block; width: 22px; height: 22px;
+    border: 3px solid #e2e8f0; border-top-color: #667eea;
+    border-radius: 50%; animation: spin 0.7s linear infinite;
+    vertical-align: middle; margin-right: 10px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .result { margin-top: 10px; animation: fadeIn 0.3s; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+  .badge {
+    display: inline-block; padding: 6px 14px; border-radius: 8px;
+    font-size: 12px; font-weight: 700; text-transform: uppercase;
+    margin-bottom: 14px;
+  }
+  .badge.ok { background: #d1fae5; color: #065f46; }
+  .badge.err { background: #fee2e2; color: #991b1b; }
+  pre {
+    background: #1e293b; color: #e2e8f0; padding: 18px;
+    border-radius: 10px; overflow-x: auto; font-size: 13px;
+    line-height: 1.6; max-height: 600px;
+  }
+  .hint { font-size: 12px; color: #94a3b8; margin-top: 12px; text-align: center; }
+</style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>🚗 nxcar RC Lookup</h1>
+      <p>Enter vehicle number — token & checksum handled on server</p>
+    </div>
+    <div class="body">
+      <div class="search">
+        <input id="vehicle" type="text" placeholder="MH02FZ0555" value="{{ vehicle }}" autofocus>
+        <button id="go" onclick="run()">🔍 Search</button>
+      </div>
+      <div class="loader" id="loader"><span class="spinner"></span>Fetching vehicle details...</div>
+      <div class="result" id="result"></div>
+      <div class="hint">Try: /rc=MH02FZ0555 in URL for direct lookup</div>
+    </div>
+  </div>
 
 <script>
-async function loadState(){
-  try{
-    const r = await fetch('/state');const d = await r.json();
-    const el = document.getElementById('status');
-    const tokEl = document.getElementById('tokStatus');
-    const csEl = document.getElementById('csStatus');
-    if(d.has_token){
-      tokEl.innerHTML = '<span class="badge ok">✅</span>';
-    } else {
-      tokEl.innerHTML = '<span class="badge err">❌</span>';
-    }
-    csEl.innerHTML = `<span class="badge ${d.checksums_count>0?'ok':'err'}">${d.checksums_count}</span>`;
-    if(d.has_token && d.checksums_count>0){
-      el.innerHTML = `🟢 Ready • Token ✅ • ${d.checksums_count} checksums`;
-      el.style.background = 'rgba(0,200,83,.15)';
-    } else {
-      el.innerHTML = `🟡 Token: ${d.has_token?'✅':'❌'} • Checksums: ${d.checksums_count}`;
-      el.style.background = 'rgba(255,171,0,.15)';
-    }
-  }catch(e){}
-}
-async function saveToken(){
-  const t = document.getElementById('token').value.trim();
-  if(!t) return alert('Token paste karo');
-  const r = await fetch('/set-token?token=' + encodeURIComponent(t));
-  const d = await r.json();
-  document.getElementById('tokMsg').innerText = JSON.stringify(d);
-  loadState();
-}
-async function autoFetch(){
-  document.getElementById('tokMsg').innerText = 'Fetching...';
-  const r = await fetch('/auto-fetch-token');
-  const d = await r.json();
-  document.getElementById('tokMsg').innerText = JSON.stringify(d);
-  loadState();
-}
-async function saveChecksums(){
-  const raw = document.getElementById('checksums').value;
-  const list = raw.split(/[\n,\s]+/).map(x=>x.trim().toLowerCase()).filter(x=>x.length===32);
-  if(!list.length) return alert('Valid 32-char checksums daalo');
-  const r = await fetch('/add-checksums?list=' + encodeURIComponent(list.join(',')));
-  const d = await r.json();
-  document.getElementById('csMsg').innerText = `✅ Saved ${d.saved} checksums`;
-  loadState();
-}
-async function clearAll(){
-  if(!confirm('Sab clear?')) return;
-  await fetch('/clear-all');
-  document.getElementById('token').value='';
-  document.getElementById('checksums').value='';
-  document.getElementById('tokMsg').innerText='';
-  document.getElementById('csMsg').innerText='';
-  loadState();
-}
-async function go(){
-  const v = document.getElementById('vnum').value.trim().toUpperCase();
-  if(!v) return;
-  document.getElementById('btn').disabled = true;
-  document.getElementById('loader').classList.add('active');
-  document.getElementById('result').innerHTML = '';
-  try{
-    const r = await fetch('/rc=' + encodeURIComponent(v));
-    const d = await r.json();
-    render(d);
-  }catch(e){
-    document.getElementById('result').innerHTML = `<div class="card"><pre>${e.message}</pre></div>`;
-  }finally{
-    document.getElementById('btn').disabled = false;
-    document.getElementById('loader').classList.remove('active');
-  }
-}
-function render(d){
-  let h = '';
-  const b = d.success ? '<span class="badge ok">✅ SUCCESS</span>' : '<span class="badge err">❌ FAILED</span>';
-  h += `<div class="card"><h3>📋 Summary ${b}</h3>
-    <div class="grid">
-      <div class="kv"><div class="k">Vehicle</div><div class="v">${d.vehicle_number||'-'}</div></div>
-      <div class="kv"><div class="k">Winning Checksum</div><div class="v"><code>${d.winning_checksum||'-'}</code></div></div>
-      <div class="kv"><div class="k">Try #</div><div class="v">${d.winning_try||'-'}/${d.total_tries||'-'}</div></div>
-      <div class="kv"><div class="k">HTTP</div><div class="v">${d.http_status||'-'}</div></div>
-    </div>
-    ${d.error?`<p style="margin-top:12px;color:#ff6b6b">⚠️ ${d.error}</p>`:''}
-  </div>`;
+async function run() {
+  const vehicle = document.getElementById('vehicle').value.trim().toUpperCase();
+  if (!vehicle) return alert('Enter vehicle number');
 
-  if(d.attempts && d.attempts.length){
-    h += `<div class="card"><h3>🔬 All Attempts (${d.attempts.length})</h3>`;
-    d.attempts.forEach(a=>{
-      h += `<div class="try-row ${a.success?'try-ok':'try-fail'}">
-        <div>#${a.try}</div>
-        <div>${a.checksum}</div>
-        <div>${a.status}</div>
-        <div>${a.success?'✅':'❌'}</div>
-      </div>`;
-    });
-    h += `</div>`;
+  const btn = document.getElementById('go');
+  const loader = document.getElementById('loader');
+  const result = document.getElementById('result');
+
+  btn.disabled = true;
+  loader.classList.add('active');
+  result.innerHTML = '';
+
+  try {
+    const res = await fetch('/rc=' + encodeURIComponent(vehicle));
+    const data = await res.json();
+    const ok = res.ok && !data.error;
+
+    result.innerHTML = `
+      <span class="badge ${ok ? 'ok' : 'err'}">${ok ? '✓ Success' : '✗ Failed'}</span>
+      <pre>${JSON.stringify(data, null, 2).replace(/</g, '&lt;')}</pre>
+    `;
+  } catch (e) {
+    result.innerHTML = `<span class="badge err">Error</span><pre>${e.message}</pre>`;
   }
 
-  if(d.vehicle_details_response){
-    h += `<div class="card"><h3>🚙 Vehicle Details</h3>
-      <pre>${JSON.stringify(d.vehicle_details_response, null, 2)}</pre></div>`;
-  }
-  document.getElementById('result').innerHTML = h;
+  btn.disabled = false;
+  loader.classList.remove('active');
 }
-loadState();
-</script></body></html>
+
+// Enter key triggers search
+document.getElementById('vehicle').addEventListener('keypress', e => {
+  if (e.key === 'Enter') run();
+});
+</script>
+</body>
+</html>
 """
+
+
+# ---------- ROUTES ----------
+
+@app.route("/rc=<vehicle_number>")
+def rc_lookup(vehicle_number):
+    """
+    Clean URL: /rc=MH02FZ0555
+    Directly returns JSON (works for both browser + API calls)
+    """
+    vehicle_number = vehicle_number.strip().upper()
+
+    # Basic validation
+    if not (5 <= len(vehicle_number) <= 15):
+        return jsonify({"error": "Invalid vehicle number"}), 400
+
+    # Check if request wants HTML (browser) or JSON (API)
+    wants_html = "text/html" in request.headers.get("Accept", "") if False else False
+    # Actually let's just always return JSON — simpler
+
+    code, data = fetch_vehicle_hidden(vehicle_number)
+    return jsonify(data), code
+
 
 @app.route("/")
 def home():
-    return render_template_string(HTML)
+    return render_template_string(HTML_PAGE, vehicle="")
+
+
+@app.route("/health")
+def health():
+    return jsonify({
+        "status": "ok",
+        "token_set": bool(AUTH_TOKEN),
+        "checksums_count": len(DEFAULT_CHECKSUMS),
+        "map_entries": len(CHECKSUM_MAP),
+    })
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    print("="*60, flush=True)
-    print("🚗 nxcar Auto RC", flush=True)
-    print(f"🌐 http://0.0.0.0:{port}", flush=True)
-    print("="*60, flush=True)
+    print(f"nxcar server running on http://0.0.0.0:{port}")
     app.run(host="0.0.0.0", port=port, debug=False)
